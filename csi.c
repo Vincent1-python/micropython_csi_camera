@@ -60,7 +60,7 @@ static mp_obj_t camera_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *k
     const uint16_t w = args[ARG_w].u_int;
     const uint16_t h = args[ARG_h].u_int;
 
-    cam_buffer_size = w * h * 2;          // RGB565
+    cam_buffer_size = w * h * 3;          // RGB565
 
     /* 1. LDO */
     esp_ldo_channel_config_t ldo_cfg = {
