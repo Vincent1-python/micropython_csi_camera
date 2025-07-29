@@ -14,7 +14,7 @@
 #include "example_sensor_init.h"
 #include "esp_private/esp_cache_private.h"
 #include "esp_heap_caps.h"
-
+#include "driver/jpeg_encode.h"
 /* ---------------- 内部状态 ---------------- */
 #define NUM_CAM_BUFFERS   2
 
@@ -24,9 +24,11 @@ static size_t cam_buffer_size = 0;
 static esp_cam_ctlr_handle_t cam_handle = NULL;
 static isp_proc_handle_t     isp_proc   = NULL;
 static esp_ldo_channel_handle_t ldo_mipi_phy = NULL;
-
+jpeg_encoder_handle_t jpeg_handle;
+jpeg_encode_memory_alloc_cfg_t tx_mem_cfg, rx_mem_cfg;
 static bool frame_ready = false;
-
+uint32_t raw_size_1080p;
+uint32_t jpg_size_1080p;
 /* ---------------- 回调 ---------------- */
 static bool camera_get_new_buffer(esp_cam_ctlr_handle_t handle,
                                   esp_cam_ctlr_trans_t *trans,
@@ -60,7 +62,7 @@ static mp_obj_t camera_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *k
     const uint16_t w = args[ARG_w].u_int;
     const uint16_t h = args[ARG_h].u_int;
 
-    cam_buffer_size = w * h * 3;          // RGB888
+    cam_buffer_size = w * h * 2;          // RGB565
 
     /* 1. LDO */
     esp_ldo_channel_config_t ldo_cfg = {
@@ -102,7 +104,7 @@ static mp_obj_t camera_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *k
         .v_res                  = h,
         .lane_bit_rate_mbps     = CSI_MIPI_CSI_LANE_BITRATE_MBPS,
         .input_data_color_type  = CAM_CTLR_COLOR_RAW8,
-        .output_data_color_type = CAM_CTLR_COLOR_RGB888,
+        .output_data_color_type = CAM_CTLR_COLOR_RGB565,
         .data_lane_num          = 2,
         .byte_swap_en           = false,
         .queue_items            = 1,
@@ -127,7 +129,7 @@ static mp_obj_t camera_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *k
         .clk_hz                 = 80 * 1000 * 1000,
         .input_data_source      = ISP_INPUT_DATA_SOURCE_CSI,
         .input_data_color_type  = ISP_COLOR_RAW8,
-        .output_data_color_type = ISP_COLOR_RGB888,
+        .output_data_color_type = ISP_COLOR_RGB565,
         .has_line_start_packet  = true,
         .has_line_end_packet    = true,
         .h_res                  = w,
@@ -138,13 +140,23 @@ static mp_obj_t camera_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *k
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("ISP init failed"));
     }
     mp_printf(&mp_plat_print, "ISP processor initialized\n");
-
     /* 6. 启动 */
     if (esp_cam_ctlr_start(cam_handle) != ESP_OK) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Camera start failed"));
     }
     mp_printf(&mp_plat_print, "Camera capture started\n");
+    jpeg_encode_engine_cfg_t encode_eng_cfg = {
+        .timeout_ms = 70,
+    };
 
+    rx_mem_cfg.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER;
+
+    tx_mem_cfg.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER;
+
+    if (jpeg_new_encoder_engine(&encode_eng_cfg, &jpeg_handle) != ESP_OK){
+    	mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Jpeg encoder init failed"));
+    }
+    mp_printf(&mp_plat_print, "Jpeg encoder initialized\n");
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_KW(camera_init_obj, 0, camera_init);
@@ -177,15 +189,54 @@ static mp_obj_t camera_deinit(void)
 }
 MP_DEFINE_CONST_FUN_OBJ_0(camera_deinit_obj, camera_deinit);
 
-/* -------------- capture -------------- */
 static mp_obj_t camera_capture(void)
 {
     if (!cam_buffers[0]) {
         mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("Camera not initialized"));
     }
-    /* 阻塞等待一帧（这里简化：直接返回第一块 buffer 内容） */
-    // TODO: 实际应用需要等待 frame_ready 或超时
-    return mp_obj_new_bytes(cam_buffers[0], cam_buffer_size);
+
+    // 获取原始图像数据大小
+    raw_size_1080p = cam_buffer_size;
+
+    // 分配内存用于存储原始图像数据
+    size_t tx_buffer_size = 0;
+    uint8_t *raw_buf_1080p = (uint8_t*)jpeg_alloc_encoder_mem(raw_size_1080p, &tx_mem_cfg, &tx_buffer_size);
+    if (raw_buf_1080p == NULL) {
+        mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to allocate memory for raw buffer"));    
+    }
+
+    // 将相机缓冲区的内容复制到分配的内存中
+    memcpy(raw_buf_1080p, cam_buffers[0], raw_size_1080p);
+
+    // 分配内存用于存储 JPEG 数据
+    size_t rx_buffer_size = 0;
+    uint8_t *jpg_buf_1080p = (uint8_t*)jpeg_alloc_encoder_mem(raw_size_1080p / 10, &rx_mem_cfg, &rx_buffer_size);
+    if (jpg_buf_1080p == NULL) {
+        mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed to allocate memory for JPEG buffer"));
+        
+    }
+
+    // 配置 JPEG 编码器
+    jpeg_encode_cfg_t enc_config = {
+        .src_type = JPEG_ENCODE_IN_FORMAT_RGB565,
+        .sub_sample = JPEG_DOWN_SAMPLING_YUV422,
+        .image_quality = 80,
+        .width = CSI_MIPI_CSI_DISP_HRES,
+        .height = CSI_MIPI_CSI_DISP_VRES,
+    };
+
+    if (jpeg_encoder_process(jpeg_handle, &enc_config, raw_buf_1080p, raw_size_1080p, jpg_buf_1080p, rx_buffer_size, &jpg_size_1080p) != ESP_OK){
+        mp_raise_msg(&mp_type_MemoryError, MP_ERROR_TEXT("Failed"));
+    }
+
+    // 返回 JPEG 数据
+    mp_obj_t jpg_data = mp_obj_new_bytes(jpg_buf_1080p, jpg_size_1080p);
+
+    // 释放分配的内存
+    free(raw_buf_1080p);
+    free(jpg_buf_1080p);
+    //free(enc_config);
+    return jpg_data;
 }
 MP_DEFINE_CONST_FUN_OBJ_0(camera_capture_obj, camera_capture);
 

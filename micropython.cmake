@@ -35,6 +35,8 @@ idf_component_get_property(COMP_ISP_DIR      esp_driver_isp COMPONENT_DIR)
 idf_component_get_property(COMP_MM_INC       esp_mm         INCLUDE_DIRS)
 idf_component_get_property(COMP_MM_DIR       esp_mm         COMPONENT_DIR)
 
+idf_component_get_property(COMP_JPEG_INC       esp_driver_jpeg         INCLUDE_DIRS)
+idf_component_get_property(COMP_JPEG_DIR       esp_driver_jpeg         COMPONENT_DIR)
 # -----------------------------------------------------------------------------
 #  Append full paths to CAM_INCLUDES
 # -----------------------------------------------------------------------------
@@ -54,7 +56,8 @@ list(APPEND   CAM_INCLUDES      ${COMP_ISP_INC})
 list(TRANSFORM COMP_MM_INC      PREPEND ${COMP_MM_DIR}/)
 list(APPEND   CAM_INCLUDES      ${COMP_MM_INC})
 
-
+list(TRANSFORM COMP_JPEG_INC      PREPEND ${COMP_JPEG_DIR}/)
+list(APPEND   CAM_INCLUDES      ${COMP_JPEG_INC})
 # -----------------------------------------------------------------------------
 #  Attach sources & includes
 # -----------------------------------------------------------------------------
